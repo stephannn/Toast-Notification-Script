@@ -552,6 +552,30 @@ function Get-CMUpdate() {
     }
 }
 
+function Remove-ToastNotificationSnoozed() {
+	$Load = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+	$Load = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
+
+	$toastNotifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app)
+	Write-Log -Message "Deleting (existing) Toast Notifier for app $App"
+	$toastNotifier.RemoveFromSchedule | Out-Null
+	
+	# Single object cannot be put into an array
+	$scheduled = @($toastNotifier.getScheduledToastNotifications())
+
+	if([bool](@($scheduled).Length -eq 0)){
+		Write-Log -Message "No existing hidden Toast Notifications have been found"
+	} elseif([bool](@($scheduled).Length -ge 1)){
+		
+		Write-Log -Message "$(@($scheduled).Length) hidden Toast Notification(s) has been found"
+		for ([int]$i = @($scheduled).Length -1; $i -ge 0 ; $i--) {
+			$toastNotifier.removeFromSchedule($scheduled[$i]);
+			Write-Log -Message "Number $($i+1) of $(@($scheduled).Length) the Toast Notifications has been removed"
+		}
+	}
+	
+}
+
 # Create Write-PackageIDRegistry function
 function Write-PackageIDRegistry() {
     Write-Log -Message "Running Write-PackageIDRegistry function"
@@ -718,15 +742,22 @@ function Display-ToastNotification() {
         else {
             Write-Log -Message "Confirmed USER context before displaying toast"
             # is running under user context
+			# Remove existing Toast notifications
+			Remove-ToastNotificationSnoozed
             $Load = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
             $Load = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
+		
             # Load the notification into the required format
             $ToastXml = New-Object -TypeName Windows.Data.Xml.Dom.XmlDocument
             $ToastXml.LoadXml($Toast.OuterXml)
-            # Display the toast notification
-            [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($App).Show($ToastXml)
+			
+			$toastNotifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app)
+			# Display the toast notification
+			#[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($App).Show($ToastXml)
+			$toastNotifier.Show($ToastXml)
+			Write-Log -Message "All good. Toast notification was displayed"
         }
-        Write-Log -Message "All good. Toast notification was displayed"
+        
         # Using Write-Output for sending status to IME log when used with Endpoint Analytics in Intune
         Write-Output "All good. Toast notification was displayed"
         if ($CustomAudio -eq "True") {
@@ -1504,13 +1535,14 @@ $global:ScriptVersion = "2.3.0"
 # Setting executing directory
 $global:ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Definition
 # Setting global custom action script location
-$global:CustomScriptsPath = "$env:APPDATA\ToastNotificationScript\Scripts"
+$global:CustomScriptsPath = "$global:ScriptPath\Scripts"
 # Setting global registry path
 $global:RegistryPath = "HKCU:\SOFTWARE\ToastNotificationScript"
 # Get running OS build
 $RunningOS = try { Get-CimInstance -Class Win32_OperatingSystem | Select-Object BuildNumber } catch { Write-Log -Level Error -Message "Failed to get running OS build. This is used with the OSUpgrade option, which now might not work properly" }
 # Get user culture for multilanguage support
-$userCulture = try { (Get-Culture).Name } catch { Write-Log -Level Error -Message "Failed to get users local culture. This is used with the multilanguage option, which now might not work properly" }
+$userCulture = try { (Get-UICulture).Name } catch { Write-Log -Level Error -Message "Failed to get users local culture. This is used with the multilanguage option, which now might not work properly" }
+#$userCulture = "de-DE"
 # Setting the default culture to en-US. This will be the default language if MultiLanguageSupport is not enabled in the config
 $defaultUserCulture = "en-US"
 # Temporary location for images if images are hosted online on blob storage or similar
@@ -1518,6 +1550,8 @@ $LogoImageTemp = "$env:TEMP\ToastLogoImage.jpg"
 $HeroImageTemp = "$env:TEMP\ToastHeroImage.jpg"
 # Setting path to local images
 $ImagesPath = "file:///$global:ScriptPath/Images"
+# Counter variable
+$CounterName = "ToastCounter"
 #endregion
 
 #region Main Process
@@ -1607,6 +1641,10 @@ if (($Config.StartsWith("https://")) -OR ($Config.StartsWith("http://"))) {
 # Catering for when config.xml is hosted locally or on fileshare
 elseif (-NOT($Config.StartsWith("https://")) -OR (-NOT($Config.StartsWith("http://")))) {
     Write-Log -Message "Specified config file seems hosted [locally or fileshare]. Treating it accordingly"
+	if (!(Test-Path -Path $Config)) {
+		Write-Log -Message "Config file path cannot be resolved. Changing config path to script directory"
+		$Config = Join-Path $global:ScriptPath $Config
+	}
     if (Test-Path -Path $Config) {
         try { 
             $Xml = [xml](Get-Content -Path $Config -Encoding UTF8)
@@ -1618,7 +1656,7 @@ elseif (-NOT($Config.StartsWith("https://")) -OR (-NOT($Config.StartsWith("http:
             Write-Log -Message "Error message: $ErrorMessage" -Level Error
             Exit 1
         }
-    }
+    }	
     else {
         Write-Log -Level Error -Message "No config file found on the specified location [locally or fileshare]"
         Exit 1
@@ -1635,7 +1673,8 @@ else {
 if(-NOT[string]::IsNullOrEmpty($Xml)) {
     try {
         Write-Log -Message "Loading xml content from $Config into variables"
-        # Load Toast Notification features 
+        # Load Toast Notification features
+		$Debug = $Xml.Configuration.Feature | Where-Object {$_.Name -like 'Debug'} | Select-Object -ExpandProperty 'Enabled'
         $ToastEnabled = $Xml.Configuration.Feature | Where-Object {$_.Name -like 'Toast'} | Select-Object -ExpandProperty 'Enabled'
         $UpgradeOS = $Xml.Configuration.Feature | Where-Object {$_.Name -like 'UpgradeOS'} | Select-Object -ExpandProperty 'Enabled'
         $PendingRebootUptime = $Xml.Configuration.Feature | Where-Object {$_.Name -like 'PendingRebootUptime'} | Select-Object -ExpandProperty 'Enabled'
@@ -1643,7 +1682,8 @@ if(-NOT[string]::IsNullOrEmpty($Xml)) {
         $ADPasswordExpiration = $Xml.Configuration.Feature | Where-Object {$_.Name -like 'ADPasswordExpiration'} | Select-Object -ExpandProperty 'Enabled'
         # Load Toast Notification options   
         $PendingRebootUptimeTextEnabled = $Xml.Configuration.Option | Where-Object {$_.Name -like 'PendingRebootUptimeText'} | Select-Object -ExpandProperty 'Enabled'
-        $MaxUptimeDays = $Xml.Configuration.Option | Where-Object {$_.Name -like 'MaxUptimeDays'} | Select-Object -ExpandProperty 'Value'
+        #$MaxUptimeDays = [Math]::Abs($Xml.Configuration.Option | Where-Object {$_.Name -like 'MaxUptimeDays'} | Select-Object -ExpandProperty 'Value')
+		$MaxUptimeDays = ($Xml.Configuration.Option | Where-Object {$_.Name -like 'MaxUptimeDays'} | Select-Object -ExpandProperty 'Value')
         $PendingRebootCheckTextEnabled = $Xml.Configuration.Option | Where-Object {$_.Name -like 'PendingRebootCheckText'} | Select-Object -ExpandProperty 'Enabled'
         $ADPasswordExpirationTextEnabled = $Xml.Configuration.Option | Where-Object {$_.Name -like 'ADPasswordExpirationText'} | Select-Object -ExpandProperty 'Enabled'
         $ADPasswordExpirationDays = $Xml.Configuration.Option | Where-Object {$_.Name -like 'ADPasswordExpirationDays'} | Select-Object -ExpandProperty 'Value'
@@ -1718,29 +1758,29 @@ if(-NOT[string]::IsNullOrEmpty($Xml)) {
             $XmlLang = $xml.Configuration.$defaultUserCulture
         }
         # Load Toast Notification text
-        $PendingRebootUptimeTextValue = $XmlLang.Text | Where-Object {$_.Name -like 'PendingRebootUptimeText'} | Select-Object -ExpandProperty '#text'
-        $PendingRebootCheckTextValue = $XmlLang.Text | Where-Object {$_.Name -like 'PendingRebootCheckText'} | Select-Object -ExpandProperty '#text'
-        $ADPasswordExpirationTextValue = $XmlLang.Text | Where-Object {$_.Name -like 'ADPasswordExpirationText'} | Select-Object -ExpandProperty '#text'
-        $CustomAudioTextToSpeech = $XmlLang.Text | Where-Object {$_.Name -like 'CustomAudioTextToSpeech'} | Select-Object -ExpandProperty '#text'
-        $ActionButton1Content = $XmlLang.Text | Where-Object {$_.Name -like 'ActionButton1'} | Select-Object -ExpandProperty '#text'
-        $ActionButton2Content = $XmlLang.Text | Where-Object {$_.Name -like 'ActionButton2'} | Select-Object -ExpandProperty '#text'
-        $DismissButtonContent = $XmlLang.Text | Where-Object {$_.Name -like 'DismissButton'} | Select-Object -ExpandProperty '#text'
-        $SnoozeButtonContent = $XmlLang.Text | Where-Object {$_.Name -like 'SnoozeButton'} | Select-Object -ExpandProperty '#text'
-        $AttributionText = $XmlLang.Text | Where-Object {$_.Name -like 'AttributionText'} | Select-Object -ExpandProperty '#text'
-        $HeaderText = $XmlLang.Text | Where-Object {$_.Name -like 'HeaderText'} | Select-Object -ExpandProperty '#text'
-        $TitleText = $XmlLang.Text | Where-Object {$_.Name -like 'TitleText'} | Select-Object -ExpandProperty '#text'
-        $BodyText1 = $XmlLang.Text | Where-Object {$_.Name -like 'BodyText1'} | Select-Object -ExpandProperty '#text'
-        $BodyText2 = $XmlLang.Text | Where-Object {$_.Name -like 'BodyText2'} | Select-Object -ExpandProperty '#text'
-        $SnoozeText = $XmlLang.Text | Where-Object {$_.Name -like 'SnoozeText'} | Select-Object -ExpandProperty '#text'
-	    $DeadlineText = $XmlLang.Text | Where-Object {$_.Name -like 'DeadlineText'} | Select-Object -ExpandProperty '#text'
-	    $GreetMorningText = $XmlLang.Text | Where-Object {$_.Name -like 'GreetMorningText'} | Select-Object -ExpandProperty '#text'
-	    $GreetAfternoonText = $XmlLang.Text | Where-Object {$_.Name -like 'GreetAfternoonText'} | Select-Object -ExpandProperty '#text'
-	    $GreetEveningText = $XmlLang.Text | Where-Object {$_.Name -like 'GreetEveningText'} | Select-Object -ExpandProperty '#text'
-	    $MinutesText = $XmlLang.Text | Where-Object {$_.Name -like 'MinutesText'} | Select-Object -ExpandProperty '#text'
-	    $HourText = $XmlLang.Text | Where-Object {$_.Name -like 'HourText'} | Select-Object -ExpandProperty '#text'
-        $HoursText = $XmlLang.Text | Where-Object {$_.Name -like 'HoursText'} | Select-Object -ExpandProperty '#text'
-	    $ComputerUptimeText = $XmlLang.Text | Where-Object {$_.Name -like 'ComputerUptimeText'} | Select-Object -ExpandProperty '#text'
-        $ComputerUptimeDaysText = $XmlLang.Text | Where-Object {$_.Name -like 'ComputerUptimeDaysText'} | Select-Object -ExpandProperty '#text'
+        $PendingRebootUptimeTextValue = $XmlLang.Text | Where-Object {$_.Name -like 'PendingRebootUptimeText'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+        $PendingRebootCheckTextValue = $XmlLang.Text | Where-Object {$_.Name -like 'PendingRebootCheckText'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+        $ADPasswordExpirationTextValue = $XmlLang.Text | Where-Object {$_.Name -like 'ADPasswordExpirationText'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+        $CustomAudioTextToSpeech = $XmlLang.Text | Where-Object {$_.Name -like 'CustomAudioTextToSpeech'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+        $ActionButton1Content = $XmlLang.Text | Where-Object {$_.Name -like 'ActionButton1'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+        $ActionButton2Content = $XmlLang.Text | Where-Object {$_.Name -like 'ActionButton2'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+        $DismissButtonContent = $XmlLang.Text | Where-Object {$_.Name -like 'DismissButton'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+        $SnoozeButtonContent = $XmlLang.Text | Where-Object {$_.Name -like 'SnoozeButton'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+        $AttributionText = $XmlLang.Text | Where-Object {$_.Name -like 'AttributionText'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+        $HeaderText = $XmlLang.Text | Where-Object {$_.Name -like 'HeaderText'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+        $TitleText = $XmlLang.Text | Where-Object {$_.Name -like 'TitleText'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+        $BodyText1 = $XmlLang.Text | Where-Object {$_.Name -like 'BodyText1'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+        $BodyText2 = $XmlLang.Text | Where-Object {$_.Name -like 'BodyText2'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+        $SnoozeText = $XmlLang.Text | Where-Object {$_.Name -like 'SnoozeText'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+	    $DeadlineText = $XmlLang.Text | Where-Object {$_.Name -like 'DeadlineText'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+	    $GreetMorningText = $XmlLang.Text | Where-Object {$_.Name -like 'GreetMorningText'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+	    $GreetAfternoonText = $XmlLang.Text | Where-Object {$_.Name -like 'GreetAfternoonText'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+	    $GreetEveningText = $XmlLang.Text | Where-Object {$_.Name -like 'GreetEveningText'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+	    $MinutesText = $XmlLang.Text | Where-Object {$_.Name -like 'MinutesText'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+	    $HourText = $XmlLang.Text | Where-Object {$_.Name -like 'HourText'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+        $HoursText = $XmlLang.Text | Where-Object {$_.Name -like 'HoursText'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+	    $ComputerUptimeText = $XmlLang.Text | Where-Object {$_.Name -like 'ComputerUptimeText'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
+        $ComputerUptimeDaysText = $XmlLang.Text | Where-Object {$_.Name -like 'ComputerUptimeDaysText'} | Where-Object { $_.PSobject.Properties.name -match '#text' } | Select-Object -ExpandProperty '#text'
         Write-Log -Message "Successfully loaded xml content from $Config"     
     }
     catch {
@@ -1970,7 +2010,7 @@ if ($CustomAppEnabled -eq "True") {
 
 # Added in version 2.2.0
 # This option is able to prevent multiple toast notification from being displayed in a row
-if ($LimitToastToRunEveryMinutesEnabled -eq "True") {
+if ($LimitToastToRunEveryMinutesEnabled -eq "True" -and $Debug -eq $false) {
     $LastRunTimeOutput = Get-NotificationLastRunTime
     if (-NOT[string]::IsNullOrEmpty($LastRunTimeOutput)) {
         if ($LastRunTimeOutput -lt $LimitToastToRunEveryMinutesValue) {
@@ -2035,7 +2075,7 @@ if ($CreateScriptsProtocolsEnabled -eq "True") {
         }
         if (((Get-Item -Path $global:RegistryPath -ErrorAction SilentlyContinue).Property -contains $RegistryName) -eq $true) {
             # If the registry key exist, but has a value less than the script version, go ahead and create scripts and protocols
-            if ((Get-ItemProperty -Path $global:RegistryPath -Name $RegistryName -ErrorAction SilentlyContinue).$RegistryName -lt $global:ScriptVersion) {
+            if ((Get-ItemProperty -Path $global:RegistryPath -Name $RegistryName -ErrorAction SilentlyContinue).$RegistryName -le $global:ScriptVersion) {
                 Write-Log -Message "Registry value of $RegistryName does not match Script version: $global:ScriptVersion"
                 try {
                     Write-Log -Message "Creating scripts and protocols for the logged on user"
@@ -2184,6 +2224,34 @@ if ($PSAppStatus -eq "True") {
     if (-NOT(Get-ItemProperty -Path $RegPath\$App -Name "SoundFile" -ErrorAction SilentlyContinue)) {
         New-ItemProperty -Path $RegPath\$App -Name "SoundFile" -PropertyType "STRING" -Force
     }
+}
+
+# Check Snooze count
+if($SnoozeButtonEnabled -eq "True"){
+	try {
+		#$RegistryPath = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings\Toast.Custom.App\'
+		$TimeHex = Get-ItemPropertyValue -Path ("$RegPath\$App") -Name LastNotificationAddedTime
+		if($TimeHex){
+			
+			if((Get-ItemProperty -Path ("$RegPath\$App")).PSObject.Properties.Name -contains $CounterName){
+				$CounterValue = Get-ItemPropertyValue -Path ("$RegPath\$App") -Name $CounterName
+				$CounterValue++
+				if($CounterValue -le 3){
+					Write-Log -Message "Snooze button was already pushed $CounterValue times. Increase counter"
+					New-ItemProperty -Path ("$RegPath\$App") -Name $CounterName -Value $CounterValue -PropertyType DWORD -Force | Out-Null
+				} else {
+					Write-Log -Message "Snooze button was already pushed $CounterValue times. Disable Snooze button"
+					$SnoozeButtonEnabled = $false
+				}
+				Write-Host $CounterValue
+			} else {
+				Write-Log -Message "App running the first time after last boot"
+				New-ItemProperty -Path ("$RegPath\$App")-Name $CounterName -Value 0 -PropertyType DWORD -Force | Out-Null
+			}
+					
+			#[DateTime]::FromFileTime($TimeHex)
+		}
+	} catch {}
 }
 
 # Checking if running toast with personal greeting with given name
@@ -2432,6 +2500,20 @@ if ($SnoozeButtonEnabled -eq "True") {
 "@
 }
 
+if($DismissButtonEnabled -eq $false){
+	$node = $Toast.toast.actions.ChildNodes | Where-Object {$_.arguments -eq "dismiss"} | ForEach-Object {
+
+		# remove all the subnodes of the <int> node, leaving an empty node <int></int>
+		#$_.ParentNode.RemoveAll()
+
+		# OR: remove the <int> node completely, including all sub nodes
+		# $_.ParentNode.ParentNode.RemoveAll()
+
+		# OR: just remove the <ses>...</ses> subnode within the <int> node
+		[void]$_.ParentNode.RemoveChild($_)
+		}
+}
+
 # Add an additional group and text to the toast xml used for notifying about possible deadline.
 if (($DeadlineEnabled -eq "True") -OR ($DynDeadlineEnabled -eq "True")) {
     
@@ -2509,7 +2591,8 @@ else {
 }
 
 # Toast used for PendingReboot check and considering OS uptime
-if (($PendingRebootUptime -eq "True") -AND ($Uptime -gt $MaxUptimeDays)) {
+if ((($PendingRebootUptime -eq "True") -AND ($Uptime -gt $MaxUptimeDays)) -OR ($Debug -eq $true)) {
+#if ((($PendingRebootUptime -eq "True") -AND ($Uptime -gt $MaxUptimeDays))) {
     Write-Log -Message "Toast notification is used in regards to pending reboot. Uptime count is greater than $MaxUptimeDays"
     Display-ToastNotification
     # Stopping script. No need to accidently run further toasts
@@ -2517,6 +2600,16 @@ if (($PendingRebootUptime -eq "True") -AND ($Uptime -gt $MaxUptimeDays)) {
 }
 else {
     Write-Log -Level Warn -Message "Conditions for displaying toast notifications for pending reboot uptime are not fulfilled"
+	
+	# Remove Toast counter
+	#$RegPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings"
+    # For clarity, declaring the App variables once again
+    #$App =  "Toast.Custom.App"
+	Remove-ItemProperty -Path ("$RegPath\$App") -Name $CounterName -Force -ErrorAction SilentlyContinue
+	#Remove-ItemProperty -Path ("$RegPath\$App") -Name "Enabled" -Force -ErrorAction SilentlyContinue
+	#Remove-ItemProperty -Path ("$RegPath\$App") -Name "ShowInActionCenter" -Force -ErrorAction SilentlyContinue
+	
+	Remove-ToastNotificationSnoozed
 }
 
 # Toast used for pendingReboot check and considering checks in registry
